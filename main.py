@@ -74,8 +74,8 @@ METRICS: list[MetricSpec] = [
 
 def save_fig(fig: Figure, base_name: str) -> None:
     os.makedirs(FIGPATH, exist_ok=True)
-    fig.savefig(os.path.join(FIGPATH, f"{base_name}.png"), dpi=600, bbox_inches="tight")
-    fig.savefig(os.path.join(FIGPATH, f"{base_name}.pdf"), dpi=600, bbox_inches="tight")
+    fig.savefig(os.path.join(FIGPATH, f"{base_name}.png"), dpi=600, transparent=True)
+    fig.savefig(os.path.join(FIGPATH, f"{base_name}.pdf"), dpi=600, transparent=True)
     plt.close(fig)
 
 
