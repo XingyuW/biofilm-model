@@ -262,7 +262,7 @@ fn solve_steady_state_diffusion_internal(
             for j in 0..n_int {
                 let i = j + 1;
                 let kinetic_rate = monod_scalar(c[i], params.v_max, params.k_s);
-                rhs[j] = kinetic_rate * rho_profile[i];
+                rhs[j] = -kinetic_rate * rho_profile[i];
             }
 
             rhs[0] += d_over_dx2 * c_left;
@@ -341,8 +341,8 @@ fn compute_outputs_internal(
     let j = calculate_diffusion_flux(&x_um, &c, &solver_params)?;
     let rho = bacterial_density_profile(&x_um, &solver_params, voltage);
 
-    let flux = j[j.len() - 1];
-    let consumption_rate_scalar = trapz(&r, &x_um)?;
+    let flux = j[0];
+    let consumption_rate_scalar = trapz(&r, &x_um)? / thickness_um;
     let biomass = trapz(&rho, &x_m)?;
 
     let c_mid_index = c.len() / 2;
@@ -463,7 +463,7 @@ fn parse_params(params: Option<&Bound<'_, PyDict>>) -> PyResult<BiofilmParameter
         }
 
         if let Some(value) = config.get_item("C_electrode_voltage")? {
-            let voltage_map = value.downcast::<PyDict>()?;
+            let voltage_map = value.cast::<PyDict>()?;
             let mut items = Vec::with_capacity(voltage_map.len());
             for (k, v) in voltage_map.iter() {
                 items.push((k.extract::<f64>()?, v.extract::<f64>()?));
@@ -472,7 +472,7 @@ fn parse_params(params: Option<&Bound<'_, PyDict>>) -> PyResult<BiofilmParameter
         }
 
         if let Some(value) = config.get_item("rho_electrode_voltage")? {
-            let voltage_map = value.downcast::<PyDict>()?;
+            let voltage_map = value.cast::<PyDict>()?;
             let mut items = Vec::with_capacity(voltage_map.len());
             for (k, v) in voltage_map.iter() {
                 items.push((k.extract::<f64>()?, v.extract::<f64>()?));
@@ -485,7 +485,7 @@ fn parse_params(params: Option<&Bound<'_, PyDict>>) -> PyResult<BiofilmParameter
 }
 
 fn params_to_pydict(py: Python<'_>, params: &BiofilmParameters) -> PyResult<Py<PyDict>> {
-    let result = PyDict::new_bound(py);
+    let result = PyDict::new(py);
     result.set_item("L", params.l)?;
     result.set_item("n_points", params.n_points)?;
     result.set_item("D", params.d)?;
@@ -498,13 +498,13 @@ fn params_to_pydict(py: Python<'_>, params: &BiofilmParameters) -> PyResult<Py<P
     result.set_item("rho_middle", params.rho_middle)?;
     result.set_item("rho_electrode_no_voltage", params.rho_electrode_no_voltage)?;
 
-    let c_voltage = PyDict::new_bound(py);
+    let c_voltage = PyDict::new(py);
     for (k, v) in &params.c_electrode_voltage {
         c_voltage.set_item(*k, *v)?;
     }
     result.set_item("C_electrode_voltage", c_voltage)?;
 
-    let rho_voltage = PyDict::new_bound(py);
+    let rho_voltage = PyDict::new(py);
     for (k, v) in &params.rho_electrode_voltage {
         rho_voltage.set_item(*k, *v)?;
     }
@@ -514,11 +514,11 @@ fn params_to_pydict(py: Python<'_>, params: &BiofilmParameters) -> PyResult<Py<P
 }
 
 fn vec_to_pyarray(py: Python<'_>, values: Vec<f64>) -> Py<PyArray1<f64>> {
-    PyArray1::from_vec_bound(py, values).unbind()
+    PyArray1::from_vec(py, values).unbind()
 }
 
 fn output_to_pydict(py: Python<'_>, out: &OutputData) -> PyResult<Py<PyDict>> {
-    let result = PyDict::new_bound(py);
+    let result = PyDict::new(py);
     result.set_item("thickness_um", out.thickness_um)?;
     result.set_item("thickness_m", out.thickness_m)?;
     result.set_item("x_um", vec_to_pyarray(py, out.x_um.clone()))?;
@@ -531,7 +531,7 @@ fn output_to_pydict(py: Python<'_>, out: &OutputData) -> PyResult<Py<PyDict>> {
     result.set_item("consumption_rate", out.consumption_rate)?;
     result.set_item("biomass", out.biomass)?;
     result.set_item("substrate_metrics", {
-        let metrics = PyDict::new_bound(py);
+        let metrics = PyDict::new(py);
         metrics.set_item("C_left", out.c_left)?;
         metrics.set_item("C_mid", out.c_mid)?;
         metrics.set_item("C_right", out.c_right)?;
@@ -544,7 +544,7 @@ fn output_to_pydict(py: Python<'_>, out: &OutputData) -> PyResult<Py<PyDict>> {
 }
 
 fn trajectory_to_pydict(py: Python<'_>, trajectory: &TrajectoryData) -> PyResult<Py<PyDict>> {
-    let result = PyDict::new_bound(py);
+    let result = PyDict::new(py);
     result.set_item("growth_axis_um", vec_to_pyarray(py, trajectory.growth_axis_um.clone()))?;
     result.set_item(
         "eval_thickness_um",
@@ -637,7 +637,7 @@ fn compute_all_growth_trajectories(
 ) -> PyResult<Py<PyDict>> {
     let parsed = parse_params(params)?;
     let points = n_points.unwrap_or(100);
-    let trajectories = PyDict::new_bound(py);
+    let trajectories = PyDict::new(py);
 
     for &terminal in &terminal_thicknesses_um {
         let trajectory = compute_growth_trajectory_internal(terminal, &parsed, voltage, points)?;
@@ -658,7 +658,7 @@ fn run_model(
     let growth_states = terminal_thicknesses_um.unwrap_or_else(|| vec![10.0, 100.0, 200.0, 300.0, 400.0, 500.0]);
     let growth_points = n_points.unwrap_or(100);
 
-    let result = PyDict::new_bound(py);
+    let result = PyDict::new(py);
     result.set_item("params", params_to_pydict(py, &parsed)?)?;
 
     let (x_no_v, c_no_v) = solve_steady_state_diffusion_internal(&parsed, None)?;
@@ -666,7 +666,7 @@ fn run_model(
     let no_v_r = consumption_rate(&c_no_v, &x_no_v, &parsed, None);
     let no_v_j = calculate_diffusion_flux(&x_no_v, &c_no_v, &parsed)?;
 
-    let no_voltage = PyDict::new_bound(py);
+    let no_voltage = PyDict::new(py);
     no_voltage.set_item("x", vec_to_pyarray(py, x_no_v.clone()))?;
     no_voltage.set_item("C", vec_to_pyarray(py, c_no_v.clone()))?;
     no_voltage.set_item("kinetic_rate", vec_to_pyarray(py, no_v_kinetic.clone()))?;
@@ -674,14 +674,14 @@ fn run_model(
     no_voltage.set_item("J", vec_to_pyarray(py, no_v_j.clone()))?;
     result.set_item("no_voltage", no_voltage)?;
 
-    let voltage_data = PyDict::new_bound(py);
+    let voltage_data = PyDict::new(py);
     for &voltage in &parsed.voltages {
         let (x_v, c_v) = solve_steady_state_diffusion_internal(&parsed, Some(voltage))?;
         let kinetic = monod_vec(&c_v, parsed.v_max, parsed.k_s);
         let r_v = consumption_rate(&c_v, &x_v, &parsed, Some(voltage));
         let j_v = calculate_diffusion_flux(&x_v, &c_v, &parsed)?;
 
-        let profile = PyDict::new_bound(py);
+        let profile = PyDict::new(py);
         profile.set_item("x", vec_to_pyarray(py, x_v))?;
         profile.set_item("C", vec_to_pyarray(py, c_v))?;
         profile.set_item("kinetic_rate", vec_to_pyarray(py, kinetic))?;
@@ -691,14 +691,14 @@ fn run_model(
     }
     result.set_item("voltage_data", voltage_data)?;
 
-    let trajectories = PyDict::new_bound(py);
-    let terminal_rows = PyList::empty_bound(py);
+    let trajectories = PyDict::new(py);
+    let terminal_rows = PyList::empty(py);
     for &terminal in &growth_states {
         let trajectory = compute_growth_trajectory_internal(terminal, &parsed, None, growth_points)?;
         trajectories.set_item(terminal, trajectory_to_pydict(py, &trajectory)?)?;
 
         let terminal_idx = trajectory.growth_axis_um.len() - 1;
-        let row = PyDict::new_bound(py);
+        let row = PyDict::new(py);
         row.set_item("terminal_thickness_um", terminal)?;
         row.set_item("terminal_thickness_m", thickness_um_to_m(terminal))?;
         row.set_item("flux_uM_um_per_s", trajectory.flux[terminal_idx])?;
