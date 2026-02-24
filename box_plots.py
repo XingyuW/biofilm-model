@@ -4,10 +4,10 @@ One-Dimensional Biofilm Model: thickness-keyed visualization suite.
 Computation is performed in Rust (`biofilm_core`) and plotting/export are handled in Python.
 
 Deliverables generated for L in {10, 100, 200, 300, 400, 500} µm:
-1) Concentration trajectories (deterministic line overlays)
-2) Kinetic-rate trajectories (deterministic line overlays)
-3) Flux trajectories (deterministic line overlays)
-4) Derived biomass trajectories (deterministic line overlays)
+1) Concentration trajectories (line + box)
+2) Kinetic-rate trajectories (line + box)
+3) Flux trajectories (line + box)
+4) Derived biomass trajectories (line + box)
 """
 
 from __future__ import annotations
@@ -30,6 +30,9 @@ fformat.ensure_initialized()  # Set up matplotlib parameters for consistent styl
 FIGPATH = "./figures/monod_advanced/SI/"
 THICKNESS_VALUES_UM = [10.0, 100.0, 200.0, 300.0, 400.0, 500.0]
 N_TRAJECTORY_POINTS = 100
+N_REPLICATES = 12
+RANDOM_SEED = 20260222
+PERTURBATION_STD = 0.03
 
 
 @dataclass(frozen=True)
@@ -50,7 +53,8 @@ METRICS: list[MetricSpec] = [
     MetricSpec(
         key="consumption_rate",
         title="Kinetic-Rate Trajectories Across Biofilm Thickness",
-        y_label="Depth-Averaged Consumption Rate (µM/s)",
+        # y_label="Depth-Averaged Consumption Rate (µM/s)",
+        y_label="Consumption Rate (µM/s)",
         filename_stem="kinetics",
     ),
     MetricSpec(
@@ -103,11 +107,65 @@ def _to_growth_trajectories(raw: Any) -> dict[float, dict[str, np.ndarray]]:
 def _get_nominal_growth_trajectories(
     thicknesses_um: list[float],
     n_points: int,
-) -> dict[float, dict[str, np.ndarray]]:
+) -> tuple[dict[float, dict[str, np.ndarray]], dict[str, Any]]:
     run_model = cast(Callable[..., Any], getattr(biofilm_core, "run_model"))
     result = run_model(None, thicknesses_um, n_points)
+    params = dict(result["params"])
     trajectories = _to_growth_trajectories(result["growth_trajectories"])
-    return trajectories
+    return trajectories, params
+
+
+def _build_replicate_params(
+    base_params: dict[str, Any],
+    rng: np.random.Generator,
+    perturbation_std: float,
+) -> dict[str, Any]:
+    params = dict(base_params)
+
+    # Minimal uncertainty mechanism: replicate-wise parameter perturbation (3% std)
+    # around calibrated values to form endpoint distributions for box summaries.
+    for key in ("D", "v_max", "K_s"):
+        factor = float(rng.lognormal(mean=0.0, sigma=perturbation_std))
+        params[key] = float(base_params[key]) * factor
+
+    return params
+
+
+def _compute_replicate_terminal_values(
+    thicknesses_um: list[float],
+    base_params: dict[str, Any],
+    n_replicates: int,
+    n_points: int,
+    seed: int,
+    perturbation_std: float,
+) -> dict[str, dict[float, list[float]]]:
+    rng = np.random.default_rng(seed)
+    compute_all_growth_trajectories = cast(
+        Callable[..., Any],
+        getattr(biofilm_core, "compute_all_growth_trajectories"),
+    )
+    metric_samples: dict[str, dict[float, list[float]]] = {
+        metric.key: {thickness: [] for thickness in thicknesses_um}
+        for metric in METRICS
+    }
+
+    for _ in range(n_replicates):
+        perturbed_params = _build_replicate_params(base_params, rng, perturbation_std)
+        trajectories_raw = compute_all_growth_trajectories(
+            thicknesses_um,
+            perturbed_params,
+            None,
+            n_points,
+        )
+        trajectories = _to_growth_trajectories(trajectories_raw)
+
+        for thickness in thicknesses_um:
+            traj = trajectories[thickness]
+            for metric in METRICS:
+                terminal_value = float(traj[metric.key][-1])
+                metric_samples[metric.key][thickness].append(terminal_value)
+
+    return metric_samples
 
 
 def _terminal_values_by_metric(
@@ -302,28 +360,78 @@ def plot_metric_line_overlay(
     return fig
 
 
-def main(diagnostics: bool = False) -> tuple[dict[float, dict[str, np.ndarray]], dict[float, Any]]:
+def plot_metric_box_summary(
+    metric: MetricSpec,
+    metric_samples: dict[float, list[float]],
+    colors: dict[float, Any],
+) -> Figure:
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    ordered_thicknesses = sorted(metric_samples.keys())
+    data = [metric_samples[thickness] for thickness in ordered_thicknesses]
+
+    box = ax.boxplot(
+        data,
+        tick_labels=[str(int(thickness)) for thickness in ordered_thicknesses],
+        patch_artist=True,
+        showfliers=True,
+    )
+
+    for patch, thickness in zip(box["boxes"], ordered_thicknesses):
+        patch.set_facecolor(colors[thickness])
+        patch.set_alpha(0.55)
+        patch.set_edgecolor(colors[thickness])
+        patch.set_linewidth(1.3)
+
+    for median in box["medians"]:
+        median.set_color("black")
+        median.set_linewidth(1.5)
+
+    ax.set_xlabel("Biofilm Thickness (µm)")
+    ax.set_ylabel(metric.y_label)
+    ax.grid(False)
+    save_fig(fig, f"SI_thickness_{metric.filename_stem}_box")
+    return fig
+
+
+def main(diagnostics: bool = False) -> tuple[dict[float, dict[str, np.ndarray]], dict[str, dict[float, list[float]]], dict[float, Any]]:
     print("=" * 64)
     print("BIOFILM MODEL: THICKNESS-KEYED VISUALIZATION SUITE")
     print("=" * 64)
 
     print("\nRunning nominal model for line overlays...")
-    nominal_trajectories = _get_nominal_growth_trajectories(
+    nominal_trajectories, params = _get_nominal_growth_trajectories(
         THICKNESS_VALUES_UM,
         N_TRAJECTORY_POINTS,
     )
     colors = build_thickness_color_map(THICKNESS_VALUES_UM)
 
+    print("\nGenerating replicate ensemble for box summaries...")
+    print(
+        "Replicate mechanism: lognormal perturbation of D, v_max, and K_s "
+        f"(σ={PERTURBATION_STD:.3f}) with seed {RANDOM_SEED}"
+    )
+    metric_samples = _compute_replicate_terminal_values(
+        THICKNESS_VALUES_UM,
+        params,
+        N_REPLICATES,
+        N_TRAJECTORY_POINTS,
+        RANDOM_SEED,
+        PERTURBATION_STD,
+    )
+
     print("\nCreating publication-ready figures...")
     for metric in METRICS:
         plot_metric_line_overlay(metric, nominal_trajectories, colors)
-        print(f"  ✓ {metric.filename_stem}: deterministic line")
+        plot_metric_box_summary(metric, metric_samples[metric.key], colors)
+        print(f"  ✓ {metric.filename_stem}: line + box")
 
     if diagnostics:
         run_diagnostics(THICKNESS_VALUES_UM, nominal_trajectories, colors)
 
     print("\nSaved figures:")
     print(f"  {FIGPATH}SI_thickness_<metric>_line.(png|pdf)")
+    print(f"  {FIGPATH}SI_thickness_<metric>_box.(png|pdf)")
     print("where <metric> ∈ {concentration, kinetics, flux, biomass}")
     if diagnostics:
         print(f"  {FIGPATH}SI_diagnostics_substrate_profiles_by_L.(png|pdf)")
@@ -337,7 +445,7 @@ def main(diagnostics: bool = False) -> tuple[dict[float, dict[str, np.ndarray]],
     if "agg" not in backend:
         plt.show()
 
-    return nominal_trajectories, colors
+    return nominal_trajectories, metric_samples, colors
 
 
 if __name__ == "__main__":
